@@ -108,6 +108,7 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
     }
 
     string[] composedGrammars;
+    string[] memoTables;
 
     // Grammar analysis in support of left-recursion.
     import pegged.introspection;
@@ -295,15 +296,24 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
         return "!blockMemo_" ~ rule ~ "_atPos.canFind(p.end)";
     }
 
+    string generateMemoTables()
+    {
+        string result;
+        foreach (memoTable; memoTables)
+            result ~= "
+    static TParseTree[size_t] " ~ memoTable ~ ";";
+        return result;
+    }
+
     string generateForgetMemo()
     {
         string result;
         result ~= "
     static void forgetMemo()
     {";
-        if (withMemo == Memoization.yes)
+        foreach (memoTable; memoTables)
             result ~= "
-        memo = null;";
+        " ~ memoTable ~ " = null;";
         if (composedGrammars.length > 0)
             result ~= "
         import std.traits;";
@@ -363,8 +373,7 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
 
                 if (withMemo == Memoization.yes) {
                     result ~= "
-    import std.typecons:Tuple, tuple;
-    static TParseTree[Tuple!(string, size_t)] memo;";
+    // __insert_memo_tables_here__";
                     result ~= generateBlockers();
                 }
 
@@ -493,7 +502,16 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
                 foreach(def; definitions)
                     result ~= generateCode(def, shortGrammarName);
 
-                // if the first rule is parameterized (a template), it's impossible to get an opCall
+                if (withMemo == Memoization.yes)
+                {
+                    // At this time memoTables is filled. Generate and insert the memoization tables.
+                    import std.algorithm.searching: findSplit;
+                    auto split = result.findSplit("// __insert_memo_tables_here__");
+                    assert(split[2].length > 0);
+                    result = split[0] ~ generateMemoTables() ~ split[2];
+                }
+
+                // If the first rule is parameterized (a template), it's impossible to get an opCall
                 // because we don't know with which template arguments it should be called.
                 // So no opCall is generated in this case.
                 if (p.children[1].children[0].children.length == 1)
@@ -582,23 +600,32 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
                 string shortName = p.matches[0];
                 string innerName;
                 string hookedName = p.matches[0];
+                string memoName;
 
                 if (parameterizedRule)
                 {
                     result = "    template " ~ completeName ~ "\n"
                              "    {\n";
                     innerName ~= "\"" ~ shortName ~ "!(\" ~ ";
+                    memoName = shortName;
                     hookedName ~= "_" ~ to!string(p.children[0].children[1].children.length);
                     foreach(i,param; p.children[0].children[1].children)
+                    {
                         innerName ~= "pegged.peg.getName!("~ param.children[0].matches[0]
                                     ~ (i<p.children[0].children[1].children.length-1 ? ")() ~ \", \" ~ "
                                                                                      : ")");
+                        memoName ~= "_" ~ param.children[0].matches[0];
+                    }
                     innerName ~= " ~ \")\"";
+                    memoName ~= "_Memo";
                 }
                 else
                 {
                     innerName ~= "`" ~ completeName ~ "`";
+                    memoName = completeName ~ "_Memo";
                 }
+                while (memoTables.canFind(memoName))
+                    memoName ~= "_";    // Prevent clashes with the way we mangle parameterized rules and ordinary rules.
 
                 string ctfeCode = "        pegged.peg.defined!(" ~ code ~ ", \"" ~ propagatedName ~ "." ~ innerName[1..$-1] ~ "\")";
                 code =            "hooked!(pegged.peg.defined!(" ~ code ~ ", \"" ~ propagatedName ~ "." ~ innerName[1..$-1] ~ "\"), \"" ~ hookedName  ~ "\")";
@@ -659,6 +686,8 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
                               "        }\n"
                               "    }\n";
                 else // Memoization.yes
+                {
+                    memoTables ~= memoName;
                     result ~= "    static TParseTree " ~ shortName ~ "(TParseTree p)\n"
                               "    {\n"
                               "        if(__ctfe)\n"
@@ -678,7 +707,7 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
                               "            if (auto s = p.end in seed)\n"
                               "                return *s;\n"
                               "            if (" ~ shouldMemoLeftRecursion(shortName) ~ ")\n"
-                              "                if (auto m = tuple(" ~ innerName ~ ", p.end) in memo)\n"
+                              "                if (auto m = p.end in " ~ memoName ~ ")\n"
                               "                    return *m;\n"
                               "            auto current = fail(p);\n"
                               "            seed[p.end] = current;\n"
@@ -705,19 +734,19 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
                                                    // and the length of seed only grows when nested recursion occurs.
                               "                    seed.remove(p.end);\n"
                             ~ unblockMemoForLeftRecursion(shortName) ~
-                              "                    memo[tuple(" ~ innerName ~ ", p.end)] = current;\n"
+                              "                    " ~ memoName ~ "[p.end] = current;\n"
                               "                    return current;\n"
                               "                }\n"
                               "            }\n"
                               :
                               // Possibly left-recursive rule, but infinite recursion is already prevented by another rule in the same cycle.
                               maybeBlockedMemo(shortName, code)
-                            ~ "            if (auto m = tuple(" ~ innerName ~ ", p.end) in memo)\n"
+                            ~ "            if (auto m = p.end in " ~ memoName ~ ")\n"
                               "                return *m;\n"
                               "            else\n"
                               "            {\n"
                               "                TParseTree result = " ~ code ~ "(p);\n"
-                              "                memo[tuple(" ~ innerName ~ ", p.end)] = result;\n"
+                              "                " ~ memoName ~ "[p.end] = result;\n"
                               "                return result;\n"
                               "            }\n"
                               )
@@ -735,11 +764,11 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
                               "            return " ~ code ~ "(TParseTree(\"\", false,[], s));\n"
                               "        }\n"
                               "    }\n";
-
-                    result ~= "    static string " ~ shortName ~ "(GetName g)\n"
-                              "    {\n"
-                              "        return \"" ~ propagatedName ~ "." ~ innerName[1..$-1] ~ "\";\n"
-                              "    }\n\n";
+                }
+                result ~= "    static string " ~ shortName ~ "(GetName g)\n"
+                          "    {\n"
+                          "        return \"" ~ propagatedName ~ "." ~ innerName[1..$-1] ~ "\";\n"
+                          "    }\n\n";
 
                 if (parameterizedRule)
                     result ~= "    }\n";
@@ -1030,8 +1059,6 @@ string grammar(Memoization withMemo = Memoization.yes)(string definition)
         }
         return result;
     }
-
-
 
     return printLeftRecursiveCycles() ~ printLeftRecursionStoppers() ~ generateCode(defAsParseTree);
 }
@@ -2718,8 +2745,10 @@ unittest // Memoization testing
     mixin(grammar!(Memoization.yes)(gram1));
     mixin(grammar!(Memoization.no)(gram2));
 
-    assert(is(typeof(Test1.memo)));
-    assert(!is(typeof(Test2.memo)));
+    assert(is(typeof(Test1.Rule1_Memo)));
+    assert(is(typeof(Test1.Rule2_Memo)));
+    assert(!is(typeof(Test2.Rule1_Memo)));
+    assert(!is(typeof(Test2.Rule2_Memo)));
 
     ParseTree result1 = Test1("aaaaaaac");      // Memo + Runtime
     enum ParseTree result2 = Test1("aaaaaaac"); // Memo + Compile-time. Note: there is no actual memoization at CT.
