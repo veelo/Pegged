@@ -1637,22 +1637,36 @@ template longest_match(rules...) if (rules.length > 0)
         size_t[rules.length] failedLength;
         size_t maxFailedLength;
 
-        // Evaluate all rules in parallel. Courtesy ag0aep6g http://forum.dlang.org/post/o913v5$1nvv$1@digitalmars.com
-        import std.meta: staticMap;
-        import std.range: only;
-        import std.parallelism: parallel;
-        // This wrapper excludes existing rule overloads:
-        static ParseTree wrap(alias f)(ParseTree arg) { return f(arg); }
-        // A template that takes the address of something.
-        enum addrOf(alias f) = &f;  // Short for template addrOf(alias f) { enum addrOf = &f; }
-        // Create an AliasSec of function pointers, from the AliasSeq of function aliases, which are filtered to only take ParseTree:
-        enum ruleptrs = staticMap!(addrOf, staticMap!(wrap, rules));
-        // Create a range of function pointers from the AliasSec.
-        auto rulerange = only(ruleptrs);
-        // Parallelise the rule evaluation.
-        foreach (i, rule; parallel(rulerange))
+        static bool parallel_foreach_busy = false;
+
+        if (!parallel_foreach_busy)
         {
-            results[i] = rule(p);
+            parallel_foreach_busy = true;
+            // Evaluate all rules in parallel. Courtesy ag0aep6g http://forum.dlang.org/post/o913v5$1nvv$1@digitalmars.com
+            import std.meta: staticMap;
+            import std.range: only;
+            import std.parallelism: parallel;
+            // This wrapper excludes existing rule overloads:
+            static ParseTree wrap(alias f)(ParseTree arg) { return f(arg); }
+            // A template that takes the address of something.
+            enum addrOf(alias f) = &f;  // Short for template addrOf(alias f) { enum addrOf = &f; }
+            // Create an AliasSec of function pointers, from the AliasSeq of function aliases, which are filtered to only take ParseTree:
+            enum ruleptrs = staticMap!(addrOf, staticMap!(wrap, rules));
+            // Create a range of function pointers from the AliasSec.
+            auto rulerange = only(ruleptrs);
+            // Parallelise the rule evaluation.
+            foreach (i, rule; parallel(rulerange))
+            {
+                results[i] = rule(p);
+            }
+            parallel_foreach_busy = false;
+        }
+        else
+        {
+            foreach (i, rule; rules)
+            {
+                results[i] = rule(p);
+            }
         }
 
         version (tracer)
