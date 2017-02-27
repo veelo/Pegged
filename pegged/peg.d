@@ -1637,55 +1637,71 @@ template longest_match(rules...) if (rules.length > 0)
         size_t[rules.length] failedLength;
         size_t maxFailedLength;
 
+        // Evaluate all rules in parallel. Courtesy ag0aep6g http://forum.dlang.org/post/o913v5$1nvv$1@digitalmars.com
+        import std.meta: staticMap;
+        import std.range: only;
+        import std.parallelism: parallel;
+        // This wrapper excludes existing rule overloads:
+        static ParseTree wrap(alias f)(ParseTree arg) { return f(arg); }
+        // A template that takes the address of something.
+        enum addrOf(alias f) = &f;  // Short for template addrOf(alias f) { enum addrOf = &f; }
+        // Create an AliasSec of function pointers, from the AliasSeq of function aliases, which are filtered to only take ParseTree:
+        enum ruleptrs = staticMap!(addrOf, staticMap!(wrap, rules));
+        // Create a range of function pointers from the AliasSec.
+        auto rulerange = only(ruleptrs);
+        // Parallelise the rule evaluation.
+        foreach (i, rule; parallel(rulerange))
+        {
+            results[i] = rule(p);
+        }
+
         version (tracer)
         {
             incTraceLevel();
         }
 
-        // Real 'longest_match' loop
-        foreach(i,r; rules)
+        // Look for the longest match
+        foreach (i, r; rules)
         {
             version (tracer)
             {
                 if (shouldTrace(getName!(r)(), p))
+                {
                     trace(traceMsg(p, name, getName!(r)()));
-            }
-            ParseTree temp = r(p);
-            version (tracer)
-            {
-                if (shouldTrace(getName!(r)(), p))
-                    trace(traceResultMsg(temp, getName!(r)()));
+                    trace(traceResultMsg(results[i], getName!(r)()));
+                }
             }
 
-            if (temp.successful)
+            if (results[i].successful)
             {
-                if (temp.end > longest.end)
-                    longest = temp;
+                if (results[i].end > longest.end)
+                    longest = results[i];
                 // Else, this rule parsed less input than another one: we discard it.
             }
             else
             {
                 enum errName = " (" ~ getName!(r)() ~")";
-                failedLength[i] = temp.end;
-                if (temp.end >= longestFail.end)
+                failedLength[i] = results[i].end;
+                if (results[i].end >= longestFail.end)
                 {
-                    maxFailedLength = temp.end;
-                    longestFail = temp;
+                    maxFailedLength = results[i].end;
+                    longestFail = results[i];
                     names[i] = errName;
-                    results[i] = temp;
 
-                    if (temp.end == longestFail.end)
-                        errorStringChars += (temp.matches.length > 0 ? temp.matches[$-1].length : 0) + errName.length + 4;
+                    if (results[i].end == longestFail.end)
+                        errorStringChars += (results[i].matches.length > 0 ? results[i].matches[$-1].length : 0) + errName.length + 4;
                     else
-                        errorStringChars = (temp.matches.length > 0 ? temp.matches[$-1].length : 0) + errName.length + 4;
+                        errorStringChars = (results[i].matches.length > 0 ? results[i].matches[$-1].length : 0) + errName.length + 4;
                 }
                 // Else, this error parsed less input than another one: we discard it.
             }
         }
+
         version (tracer)
         {
             decTraceLevel();
         }
+
         if (longest.successful)
         {
             longest.children = [longest];
